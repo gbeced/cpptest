@@ -1,19 +1,99 @@
+#include <algorithm>
+#include <cassert>
 #include <ctime>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
+#include <array>
+
 #include <boost/asio.hpp>
 
-using boost::asio::ip::tcp;
+
+typedef std::vector<unsigned char> buffer_t;
+static const size_t msg_header_size = 4;
+static const size_t max_msg_size = 4096;
+static const std::array<uint8_t, 2> valid_request_types = {0, 2}; 
 
 
-std::string make_daytime_string()
+template<typename T>
+T parse_numeric(const buffer_t& buffer, size_t offset)
 {
-    using namespace std; // For time_t, time and ctime;
-    time_t now = time(0);
-    return ctime(&now);
+    if (offset + sizeof(T) > buffer.size()) {
+        throw std::runtime_error("Invalid offset");
+    }
+    return *reinterpret_cast<const T*>(&buffer[offset]);
 }
+
+
+const char* parse_charz(const buffer_t& buffer, size_t offset, size_t size)
+{
+    if (offset + size > buffer.size()) {
+        throw std::runtime_error("Invalid offset");
+    }
+    const char* ret = reinterpret_cast<const char*>(&buffer[offset]);
+    return ret;
+}
+
+
+class MessageHeader
+{
+public:
+    MessageHeader(const buffer_t& buffer) :
+        buffer_(buffer)
+    {}
+
+    u_int16_t size() const
+    {
+        return parse_numeric<u_int16_t>(buffer_, 0);
+    }
+
+    u_int8_t type() const
+    {
+        return parse_numeric<u_int8_t>(buffer_, 2);
+    }
+
+    u_int8_t sequence() const
+    {
+        return parse_numeric<u_int8_t>(buffer_, 3);
+    }
+
+private:
+    const buffer_t& buffer_;
+};
+
+
+class Message
+{
+public:
+    Message(const buffer_t& buffer) :
+        header(buffer),
+        buffer_(buffer)
+    {}
+
+    MessageHeader header;
+
+private:
+    const buffer_t& buffer_;
+};
+
+
+class LoginRequest :
+    public Message
+{
+public:
+    static const u_int8_t type = 0;
+};
+
+
+class EchoRequest :
+    public Message
+{
+public:
+    static const u_int8_t type = 2;
+};
 
 
 class tcp_connection :
@@ -27,46 +107,98 @@ public:
         return std::shared_ptr<tcp_connection>(new tcp_connection(io_context));
     }
 
-    tcp::socket &socket()
+    boost::asio::ip::tcp::socket &socket()
     {
         return socket_;
     }
 
     void start()
     {
-        std::cout << "tcp_connection::start" << std::endl;
-
-        auto msg = make_daytime_string();
-        boost::asio::async_write(
+        std::cout << "Reading header" << std::endl;
+        buffer_.resize(msg_header_size);
+        boost::asio::async_read(
             socket_,
-            boost::asio::buffer(msg),
-            std::bind(&tcp_connection::handle_write, this, std::placeholders::_1, std::placeholders::_2)
+            boost::asio::buffer(buffer_.data(), msg_header_size),
+            std::bind(&tcp_connection::header_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
         );
-
-        // boost::asio::async_write(
-        //     socket_,
-        //     boost::asio::buffer(message_),
-        //     std::bind(
-        //         &tcp_connection::handle_write, shared_from_this(),
-        //         boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred
-        //     )
-        // );
     }
 
 private:
     tcp_connection(boost::asio::io_context &io_context) :
-        socket_(io_context)
+        socket_(io_context),
+        buffer_(msg_header_size)
     {
     }
 
-    void handle_write(boost::system::error_code error, size_t bytes_transferred)
+    void header_read(boost::system::error_code error, size_t bytes_transferred)
     {
+       if (error) {
+            std::cout << 
+                "Failed to read header. error: " << error <<
+                " bytes_transferred: " << bytes_transferred <<
+                std::endl;
+            return;
+       }
+
+        MessageHeader header(buffer_);
+        if (header.size() > max_msg_size || header.size() <= msg_header_size) {
+            std::cout << 
+                "Invalid message size. size: " << header.size() <<
+                std::endl;
+            return;
+        }
+        if (!std::any_of(
+            valid_request_types.begin(), valid_request_types.end(), [&](u_int8_t msg_type){return header.type() == msg_type;}
+        )) {
+            std::cout << 
+                "Invalid message type. type: " << static_cast<u_int16_t>(header.type()) <<
+                std::endl;
+            return;
+        }
+
+        std::cout << "Header read. size: " << header.size() <<
+            " type: " << static_cast<u_int16_t>(header.type()) <<
+            " sequence: " << static_cast<u_int16_t>(header.sequence()) <<
+            std::endl;
+        std::cout << "Reading the rest of the message" << std::endl;
+        buffer_.resize(header.size());
+        boost::asio::async_read(
+            socket_,
+            boost::asio::buffer(buffer_.data() + msg_header_size, header.size() - msg_header_size),
+            std::bind(&tcp_connection::body_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
+        );
+    }
+
+    void body_read(boost::system::error_code error, size_t bytes_transferred)
+    {
+       if (error) {
+            std::cout << 
+                "Failed to read body. error: " << error <<
+                " bytes_transferred: " << bytes_transferred <<
+                std::endl;
+            return;
+       }
+
         std::cout << 
-            "tcp_connection::handle_write. error: " << error <<
+            "body_read. error: " << error <<
             " bytes_transferred: " << bytes_transferred <<
             std::endl;
+
+
+        // auto msg = make_daytime_string();
+        // boost::asio::async_write(
+        //     socket_,
+        //     boost::asio::buffer(msg),
+        //     std::bind(&tcp_connection::response_write, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
+        // );
     }
-    tcp::socket socket_;
+
+    void response_write(boost::system::error_code error, size_t bytes_transferred)
+    {
+    }
+
+    boost::asio::ip::tcp::socket socket_;
+    buffer_t buffer_;
 };
 
 
@@ -75,7 +207,7 @@ class tcp_server
 public:
     tcp_server(boost::asio::io_context &io_context, boost::asio::ip::port_type port) :
         io_context_(io_context),
-        acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
+        acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port))
     {
         start_accept();
     }
@@ -92,10 +224,9 @@ private:
 
     void handle_accept(tcp_connection::pointer connection, boost::system::error_code error)
     {
-        std::cout << "tcp_server::handle_accept. error: " << error << std::endl;
+        std::cout << "Accepted new connection. error: " << error << std::endl;
 
-        if (!error)
-        {
+        if (!error) {
             connection->start();
         }
 
@@ -104,20 +235,18 @@ private:
 
 
     boost::asio::io_context &io_context_;
-    tcp::acceptor acceptor_;
+    boost::asio::ip::tcp::acceptor acceptor_;
 };
 
 
 int main()
 {
-    try
-    {
+    try {
         boost::asio::io_context io_context;
         tcp_server server(io_context, 12345);
         io_context.run();
     }
-    catch (std::exception &e)
-    {
+    catch (std::exception &e) {
         std::cerr << e.what() << std::endl;
     }
 
