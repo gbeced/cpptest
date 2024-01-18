@@ -218,13 +218,18 @@ private:
 
     void header_read(boost::system::error_code error, size_t bytes_transferred)
     {
-       if (error) {
-            std::cerr << 
-                "ERROR - Failed to read header. error: " << error.message() <<
-                ". bytes_transferred: " << bytes_transferred <<
-                std::endl;
+        if (error) {
+            if (error == boost::asio::error::misc_errors::eof) {
+                std::cout << "Client disconnected" << std::endl;
+            }
+            else {
+                std::cerr << 
+                    "ERROR - Failed to read header. error: " << error.message() <<
+                    ". bytes_transferred: " << bytes_transferred <<
+                    std::endl;
+            }
             return;
-       }
+        }
 
         MessageHeader header(buffer_);
         if (header.get_msg_size() > max_msg_size || header.get_msg_size() <= MessageHeader::size) {
