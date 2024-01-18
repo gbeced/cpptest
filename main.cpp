@@ -179,6 +179,19 @@ public:
 };
 
 
+class EchoResponse :
+    public Message
+{
+public:
+    static const u_int8_t type = 3;
+
+    EchoResponse(Buffer& buffer) :
+        Message(buffer)
+    {}
+};
+
+
+
 class tcp_connection :
     public std::enable_shared_from_this<tcp_connection>
 {
@@ -312,15 +325,21 @@ private:
 
     void process_echo_request()
     {
+        std::cout << "Processing echo request" << std::endl;
+
         if (!logged_in()) {
             std::cerr << "ERROR - Not logged in" << std::endl;
             return;
         }
 
         try {
-            EchoRequest msg(buffer_);
+            EchoResponse response(buffer_);
+            response.header.set_msg_type(EchoResponse::type);
 
-            std::cout << "Processing echo request" << std::endl;
+            boost::asio::async_write(
+                socket_, buffer_.as_asio_buffer(),
+                std::bind(&tcp_connection::response_write, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
+            );
         }
         catch (const std::exception& e) {
             std::cerr << "ERROR - Failed to process echo request: " << e.what() << std::endl;
@@ -370,6 +389,7 @@ private:
     void handle_accept(tcp_connection::pointer connection, boost::system::error_code error)
     {
         if (!error) {
+            std::cout << "New connection" << std::endl;
             connection->start();
         }
         else {
