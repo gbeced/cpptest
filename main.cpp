@@ -13,42 +13,59 @@
 #include <boost/endian.hpp>
 
 
-typedef std::vector<unsigned char> buffer_t;
 static const size_t max_msg_size = 4096;
 static const std::array<uint8_t, 2> valid_request_types = {0, 2}; 
 
 
-template<typename T>
-void pack_numeric(const T& value, buffer_t& buffer, size_t offset)
+class Buffer
 {
-    if (offset + sizeof(T) > buffer.size()) {
-        throw std::runtime_error("Invalid offset");
+public:
+    void resize(size_t size)
+    {
+        buffer_.resize(size);
     }
-    *reinterpret_cast<T*>(&buffer[offset]) = boost::endian::native_to_big<T>(value);
-}
 
-
-template<typename T>
-T unpack_numeric(const buffer_t& buffer, size_t offset)
-{
-    if (offset + sizeof(T) > buffer.size()) {
-        throw std::runtime_error("Invalid offset");
+    boost::asio::mutable_buffer as_asio_buffer(size_t offset = 0)
+    {
+        if (offset >= buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        return boost::asio::buffer(buffer_.data() + offset, buffer_.size() - offset);
     }
-    T ret = *reinterpret_cast<const T*>(&buffer[offset]);
-    return boost::endian::big_to_native<T>(ret);
-}
 
+    template<typename T>
+    void pack_numeric(size_t offset, const T& value)
+    {
+        if (offset + sizeof(T) > buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        *reinterpret_cast<T*>(&buffer_[offset]) = boost::endian::native_to_big<T>(value);
+    }
 
-const char* unpack_charz(const buffer_t& buffer, size_t offset, size_t size)
-{
-    if (offset + size > buffer.size()) {
-        throw std::runtime_error("Invalid offset");
+    template<typename T>
+    T unpack_numeric(size_t offset) const
+    {
+        if (offset + sizeof(T) > buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        T ret = *reinterpret_cast<const T*>(&buffer_[offset]);
+        return boost::endian::big_to_native<T>(ret);
     }
-    if (std::find(&buffer[offset], &buffer[offset + size], 0) == &buffer[offset + size]) {
-        throw std::runtime_error("Invalid string");
+
+    const char* unpack_charz(size_t offset, size_t size) const
+    {
+        if (offset + size > buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        if (std::find(&buffer_[offset], &buffer_[offset + size], 0) == &buffer_[offset + size]) {
+            throw std::runtime_error("Invalid string");
+        }
+        return reinterpret_cast<const char*>(&buffer_[offset]);
     }
-    return reinterpret_cast<const char*>(&buffer[offset]);
-}
+
+private:
+    std::vector<unsigned char> buffer_;
+};
 
 
 class MessageHeader
@@ -56,49 +73,49 @@ class MessageHeader
 public:
     static const u_int8_t size = 4;
 
-    MessageHeader(buffer_t& buffer) :
+    MessageHeader(Buffer& buffer) :
         buffer_(buffer)
     {}
 
     u_int16_t get_msg_size() const
     {
-        return unpack_numeric<u_int16_t>(buffer_, 0);
+        return buffer_.unpack_numeric<u_int16_t>(0);
     }
 
     void set_msg_size(u_int16_t size)
     {
-        pack_numeric<u_int16_t>(size, buffer_, 0);
+        buffer_.pack_numeric<u_int16_t>(0, size);
     }
 
     u_int8_t get_msg_type() const
     {
-        return unpack_numeric<u_int8_t>(buffer_, 2);
+        return buffer_.unpack_numeric<u_int8_t>(2);
     }
 
     void set_msg_type(u_int8_t type)
     {
-        pack_numeric<u_int8_t>(type, buffer_, 2);
+        buffer_.pack_numeric<u_int8_t>(2, type);
     }
 
     u_int8_t get_msg_sequence() const
     {
-        return unpack_numeric<u_int8_t>(buffer_, 3);
+        return buffer_.unpack_numeric<u_int8_t>(3);
     }
 
     void set_msg_sequence(u_int8_t sequence)
     {
-        pack_numeric<u_int8_t>(sequence, buffer_, 3);
+        buffer_.pack_numeric<u_int8_t>(3, sequence);
     }
 
 private:
-    buffer_t& buffer_;
+    Buffer& buffer_;
 };
 
 
 class Message
 {
 public:
-    Message(buffer_t& buffer) :
+    Message(Buffer& buffer) :
         header(buffer),
         buffer_(buffer)
     {}
@@ -106,7 +123,7 @@ public:
     MessageHeader header;
 
 protected:
-    buffer_t& buffer_;
+    Buffer& buffer_;
 };
 
 
@@ -116,18 +133,18 @@ class LoginRequest :
 public:
     static const u_int8_t type = 0;
 
-    LoginRequest(buffer_t& buffer) :
+    LoginRequest(Buffer& buffer) :
         Message(buffer)
     {}
 
     const char* username() const
     {
-        return unpack_charz(buffer_, 4, 32);
+        return buffer_.unpack_charz(4, 32);
     }
 
     const char* password() const
     {
-        return unpack_charz(buffer_, 36, 32);
+        return buffer_.unpack_charz(36, 32);
     }
 };
 
@@ -139,13 +156,13 @@ public:
     static const u_int8_t type = 1;
     static const u_int8_t size = MessageHeader::size + 2;
 
-    LoginResponse(buffer_t& buffer) :
+    LoginResponse(Buffer& buffer) :
         Message(buffer)
     {}
 
     void set_status_code(u_int16_t status_code)
     {
-        pack_numeric<u_int16_t>(status_code, buffer_, 4);
+        buffer_.pack_numeric<u_int16_t>(4, status_code);
     }
 };
 
@@ -156,7 +173,7 @@ class EchoRequest :
 public:
     static const u_int8_t type = 2;
 
-    EchoRequest(buffer_t& buffer) :
+    EchoRequest(Buffer& buffer) :
         Message(buffer)
     {}
 };
@@ -183,16 +200,14 @@ public:
         std::cout << "Reading header" << std::endl;
         buffer_.resize(MessageHeader::size);
         boost::asio::async_read(
-            socket_,
-            boost::asio::buffer(buffer_.data(), buffer_.size()),
+            socket_, buffer_.as_asio_buffer(),
             std::bind(&tcp_connection::header_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
         );
     }
 
 private:
     tcp_connection(boost::asio::io_context &io_context) :
-        socket_(io_context),
-        buffer_(MessageHeader::size)
+        socket_(io_context)
     {
     }
 
@@ -231,8 +246,7 @@ private:
 
         buffer_.resize(header.get_msg_size());
         boost::asio::async_read(
-            socket_,
-            boost::asio::buffer(buffer_.data() + MessageHeader::size, buffer_.size() - MessageHeader::size),
+            socket_, buffer_.as_asio_buffer(MessageHeader::size),
             std::bind(&tcp_connection::body_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
         );
     }
@@ -259,7 +273,6 @@ private:
         default:
             std::cerr << "ERROR - Invalid message type: " << static_cast<u_int16_t>(header.get_msg_type()) << std::endl;
         } 
-
     }
 
     void process_login_request()
@@ -283,8 +296,7 @@ private:
             response.set_status_code(1);
 
             boost::asio::async_write(
-                socket_,
-                boost::asio::buffer(buffer_.data(), buffer_.size()),
+                socket_, buffer_.as_asio_buffer(),
                 std::bind(&tcp_connection::response_write, shared_from_this(), std::placeholders::_1, std::placeholders::_2)
             );
         }
@@ -313,8 +325,7 @@ private:
     void response_write(boost::system::error_code error, size_t bytes_transferred)
     {
         if (error) {
-            std::cerr << 
-                "ERROR - Failed to write response. error: " << error.message() <<
+            std::cerr << "ERROR - Failed to write response. error: " << error.message() <<
                 " bytes_transferred: " << bytes_transferred <<
                 std::endl;
             return;
@@ -325,7 +336,7 @@ private:
     }
 
     boost::asio::ip::tcp::socket socket_;
-    buffer_t buffer_;
+    Buffer buffer_;
     std::string username_;
     std::string password_;
 };
