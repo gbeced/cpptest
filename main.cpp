@@ -17,12 +17,74 @@ static const size_t max_msg_size = 4096;
 static const std::array<uint8_t, 2> valid_request_types = {0, 2}; 
 
 
+uint8_t calculate_checksum(const std::string& input)
+{
+    uint8_t checksum = 0;
+    for (char c : input) {
+        checksum += static_cast<uint8_t>(c);
+    }
+    // checksum = ~checksum;
+    return checksum;
+}
+
+
+uint32_t next_key(uint32_t key)
+{
+  return (key*1103515245 + 12345) % 0x7FFFFFFF;
+}
+
+
+class CipherKeyGenerator
+{
+public:
+    CipherKeyGenerator(const std::string& username, const std::string& password, uint8_t sequence)
+    {
+        uint32_t initial_key = sequence << 16 | calculate_checksum(username) << 8 | calculate_checksum(password);
+        key_ = next_key(initial_key);
+    }
+
+    uint16_t get_next()
+    {
+        uint8_t ret = key_ % 256;
+        key_ = next_key(key_);
+        return ret;
+    }
+
+private:
+    uint32_t key_;
+};
+
+
 class Buffer
 {
 public:
+    size_t get_size() const
+    {
+        return buffer_.size();
+    }
+
     void resize(size_t size)
     {
         buffer_.resize(size);
+    }
+
+    uint8_t* get_ptr(size_t offset)
+    {
+        if (offset > buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        return &buffer_[offset];
+    }
+
+    const char* get_charz(size_t offset, size_t size) const
+    {
+        if (offset + size > buffer_.size()) {
+            throw std::runtime_error("Invalid offset");
+        }
+        if (std::find(&buffer_[offset], &buffer_[offset + size], 0) == &buffer_[offset + size]) {
+            throw std::runtime_error("Invalid string");
+        }
+        return reinterpret_cast<const char*>(&buffer_[offset]);
     }
 
     boost::asio::mutable_buffer as_asio_buffer(size_t offset = 0)
@@ -52,59 +114,48 @@ public:
         return boost::endian::big_to_native<T>(ret);
     }
 
-    const char* unpack_charz(size_t offset, size_t size) const
-    {
-        if (offset + size > buffer_.size()) {
-            throw std::runtime_error("Invalid offset");
-        }
-        if (std::find(&buffer_[offset], &buffer_[offset + size], 0) == &buffer_[offset + size]) {
-            throw std::runtime_error("Invalid string");
-        }
-        return reinterpret_cast<const char*>(&buffer_[offset]);
-    }
-
 private:
-    std::vector<unsigned char> buffer_;
+    std::vector<uint8_t> buffer_;
 };
 
 
 class MessageHeader
 {
 public:
-    static const u_int8_t size = 4;
+    static const uint8_t size = 4;
 
     MessageHeader(Buffer& buffer) :
         buffer_(buffer)
     {}
 
-    u_int16_t get_msg_size() const
+    uint16_t get_msg_size() const
     {
-        return buffer_.unpack_numeric<u_int16_t>(0);
+        return buffer_.unpack_numeric<uint16_t>(0);
     }
 
-    void set_msg_size(u_int16_t size)
+    void set_msg_size(uint16_t size)
     {
-        buffer_.pack_numeric<u_int16_t>(0, size);
+        buffer_.pack_numeric<uint16_t>(0, size);
     }
 
-    u_int8_t get_msg_type() const
+    uint8_t get_msg_type() const
     {
-        return buffer_.unpack_numeric<u_int8_t>(2);
+        return buffer_.unpack_numeric<uint8_t>(2);
     }
 
-    void set_msg_type(u_int8_t type)
+    void set_msg_type(uint8_t type)
     {
-        buffer_.pack_numeric<u_int8_t>(2, type);
+        buffer_.pack_numeric<uint8_t>(2, type);
     }
 
-    u_int8_t get_msg_sequence() const
+    uint8_t get_msg_sequence() const
     {
-        return buffer_.unpack_numeric<u_int8_t>(3);
+        return buffer_.unpack_numeric<uint8_t>(3);
     }
 
-    void set_msg_sequence(u_int8_t sequence)
+    void set_msg_sequence(uint8_t sequence)
     {
-        buffer_.pack_numeric<u_int8_t>(3, sequence);
+        buffer_.pack_numeric<uint8_t>(3, sequence);
     }
 
 private:
@@ -131,7 +182,7 @@ class LoginRequest :
     public Message
 {
 public:
-    static const u_int8_t type = 0;
+    static const uint8_t type = 0;
 
     LoginRequest(Buffer& buffer) :
         Message(buffer)
@@ -139,12 +190,12 @@ public:
 
     const char* username() const
     {
-        return buffer_.unpack_charz(4, 32);
+        return buffer_.get_charz(4, 32);
     }
 
     const char* password() const
     {
-        return buffer_.unpack_charz(36, 32);
+        return buffer_.get_charz(36, 32);
     }
 };
 
@@ -153,16 +204,16 @@ class LoginResponse :
     public Message
 {
 public:
-    static const u_int8_t type = 1;
-    static const u_int8_t size = MessageHeader::size + 2;
+    static const uint8_t type = 1;
+    static const uint8_t size = MessageHeader::size + 2;
 
     LoginResponse(Buffer& buffer) :
         Message(buffer)
     {}
 
-    void set_status_code(u_int16_t status_code)
+    void set_status_code(uint16_t status_code)
     {
-        buffer_.pack_numeric<u_int16_t>(4, status_code);
+        buffer_.pack_numeric<uint16_t>(4, status_code);
     }
 };
 
@@ -171,11 +222,33 @@ class EchoRequest :
     public Message
 {
 public:
-    static const u_int8_t type = 2;
+    static const uint8_t type = 2;
 
     EchoRequest(Buffer& buffer) :
         Message(buffer)
     {}
+
+    uint16_t get_cipher_message_size() const
+    {
+        return buffer_.unpack_numeric<uint16_t>(4);
+    }
+
+    // void decrypt_message_inplace(const std::string& username, const std::string& password)
+    // {
+    //     uint8_t cipher_msg_offset = 6;
+    //     uint16_t cipher_message_size = get_cipher_message_size();
+
+    //     if (cipher_msg_offset + cipher_message_size != buffer_.get_size()) {
+    //         throw std::runtime_error("Invalid cipher message size.");
+    //     }
+
+    //     CipherKeyGenerator key_gen(username, password, header.get_msg_sequence());
+    //     uint8_t* begin = buffer_.get_ptr(cipher_msg_offset);
+    //     uint8_t* end = buffer_.get_ptr(buffer_.get_size());
+    //     std::transform(
+    //         begin, end, begin, [&](uint8_t cipher){return cipher ^ key_gen.get_next();}
+    //     );
+    // }
 };
 
 
@@ -183,7 +256,7 @@ class EchoResponse :
     public Message
 {
 public:
-    static const u_int8_t type = 3;
+    static const uint8_t type = 3;
 
     EchoResponse(Buffer& buffer) :
         Message(buffer)
@@ -203,7 +276,7 @@ public:
         return std::shared_ptr<tcp_connection>(new tcp_connection(io_context));
     }
 
-    boost::asio::ip::tcp::socket &socket()
+    boost::asio::ip::tcp::socket & get_socket()
     {
         return socket_;
     }
@@ -250,15 +323,15 @@ private:
             return;
         }
         if (!std::any_of(
-            valid_request_types.begin(), valid_request_types.end(), [&](u_int8_t msg_type){return header.get_msg_type() == msg_type;}
+            valid_request_types.begin(), valid_request_types.end(), [&](uint8_t msg_type){return header.get_msg_type() == msg_type;}
         )) {
-            std::cerr << "ERROR - Invalid message type: " << static_cast<u_int16_t>(header.get_msg_type()) << std::endl;
+            std::cerr << "ERROR - Invalid message type: " << static_cast<uint16_t>(header.get_msg_type()) << std::endl;
             return;
         }
 
         std::cout << "Header ok. size: " << header.get_msg_size() <<
-            " type: " << static_cast<u_int16_t>(header.get_msg_type()) <<
-            " sequence: " << static_cast<u_int16_t>(header.get_msg_sequence()) <<
+            " type: " << static_cast<uint16_t>(header.get_msg_type()) <<
+            " sequence: " << static_cast<uint16_t>(header.get_msg_sequence()) <<
             std::endl;
         std::cout << "Reading the rest of the message" << std::endl;
 
@@ -289,7 +362,7 @@ private:
             process_echo_request();
             break;
         default:
-            std::cerr << "ERROR - Invalid message type: " << static_cast<u_int16_t>(header.get_msg_type()) << std::endl;
+            std::cerr << "ERROR - Invalid message type: " << static_cast<uint16_t>(header.get_msg_type()) << std::endl;
         } 
     }
 
@@ -333,6 +406,9 @@ private:
         }
 
         try {
+            EchoRequest request(buffer_);
+            // request.decrypt_message_inplace(username_, password_);
+
             EchoResponse response(buffer_);
             response.header.set_msg_type(EchoResponse::type);
 
@@ -381,7 +457,7 @@ private:
     {
         auto connection = tcp_connection::create(io_context_);
         acceptor_.async_accept(
-            connection->socket(),
+            connection->get_socket(),
             std::bind(&tcp_server::handle_accept, this, connection, std::placeholders::_1)
         );
     }
